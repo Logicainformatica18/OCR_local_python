@@ -1,0 +1,50 @@
+i# === Python ===
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+.cache/
+.coverage
+.coverage.*
+htmlcov/
+.ipynb_checkpoints/
+
+# === Entornos y secretos ===
+.venv/
+venv/
+.env
+.env.*
+*.env
+.envrc
+*.key
+*.pem
+credentials.json
+secret*.json
+
+# === Editores/IDE ===
+.vscode/
+.idea/
+*.code-workspace
+
+# === SO (Windows/macOS) ===
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# === Logs / temporales / datos locales ===
+*.log
+logs/
+tmp/
+temp/
+uploads/
+data/
