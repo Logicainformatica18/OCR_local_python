@@ -20,7 +20,7 @@ import tempfile, os, sys, subprocess, base64
 import fitz  # PyMuPDF
 import pytesseract
 from PIL import Image
-from typing import Tuple
+from typing import Tuple, Dict, Any
 
 # ---- GPU (DL) imports opcionales ----
 import numpy as np
@@ -37,9 +37,9 @@ except Exception:
     HAS_TORCH = False
 
 # (Opcional) fija la ruta a Tesseract si NO está en PATH
-# pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+# pytesseract.pytesseract.tesseract_cmd = r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
 
-app = FastAPI(title="Local OCR (Tesseract + OCRmyPDF + EasyOCR GPU)", version="1.1")
+app = FastAPI(title="Local OCR (Tesseract + OCRmyPDF + EasyOCR GPU)", version="1.2")
 
 # --------- Utilidades comunes ---------
 def extract_text_native_pdf(pdf_path: str) -> Tuple[str, int]:
@@ -64,8 +64,35 @@ def bin_path_exists(exe: str) -> bool:
     from shutil import which
     return which(exe) is not None
 
-# --------- Utilidades EasyOCR (GPU/CPU) ---------
+# --------- Utilidades Torch/EasyOCR ---------
+def torch_env_info() -> Dict[str, Any]:
+    """Datos de Torch/CUDA para reporte."""
+    info: Dict[str, Any] = {
+        "torch": HAS_TORCH,
+        "torch_version": None,
+        "cuda": False,
+        "cuda_version": None,
+        "gpu_name": None,
+        "device_count": 0,
+    }
+    if not HAS_TORCH:
+        return info
+    try:
+        info["torch_version"] = getattr(torch, "__version__", None)
+        info["cuda"] = torch.cuda.is_available()
+        info["cuda_version"] = getattr(torch.version, "cuda", None)
+        if info["cuda"]:
+            info["device_count"] = torch.cuda.device_count()
+            try:
+                info["gpu_name"] = torch.cuda.get_device_name(0)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return info
+
 _reader_cache = {}
+
 def get_easyocr_reader(lang_list, gpu_preference=None):
     """
     Crea o reutiliza un EasyOCR Reader.
@@ -96,6 +123,24 @@ def list_from_lang_str(lang_str: str):
     mapping = {'spa': 'es', 'eng': 'en'}
     return [mapping.get(tok.strip().lower(), tok.strip().lower()) for tok in lang_str.split('+')]
 
+
+def reader_uses_cuda(reader) -> Dict[str, Any]:
+    """Devuelve {'gpu': bool, 'device': 'cuda:0'|'cpu'} según el reader de EasyOCR."""
+    device_str = None
+    is_cuda = False
+    try:
+        dev = getattr(reader, 'device', None)  # torch.device o str
+        if dev is not None:
+            device_str = str(dev)
+            # dev puede ser torch.device('cuda:0') o 'cpu'
+            if isinstance(dev, str):
+                is_cuda = dev.startswith('cuda')
+            else:
+                is_cuda = getattr(dev, 'type', '') == 'cuda'
+    except Exception:
+        pass
+    return {"gpu": is_cuda, "device": device_str}
+
 # --------- Endpoints ---------
 @app.get("/health")
 def health():
@@ -103,15 +148,13 @@ def health():
     tesseract_ok = bin_path_exists("tesseract")
     gs_ok = bin_path_exists("gswin64c") or bin_path_exists("gs")  # Windows/Linux
     easyocr_ok = HAS_EASYOCR
-    torch_cuda = (HAS_TORCH and torch.cuda.is_available())
-    gpu_name = (torch.cuda.get_device_name(0) if torch_cuda else None)
+    tinfo = torch_env_info()
     return {
         "ok": True,
         "tesseract": tesseract_ok,
         "ghostscript": gs_ok,
         "easyocr": easyocr_ok,
-        "cuda": torch_cuda,
-        "gpu": gpu_name
+        **tinfo,
     }
 
 # ---------- CPU: Tesseract imagen ----------
@@ -228,7 +271,17 @@ async def ocr_image_dl(
         reader = get_easyocr_reader(list_from_lang_str(lang), gpu_preference=use_gpu)
         result = reader.readtext(np.array(img), detail=1, paragraph=True)
         text = "\n".join([r[1] for r in result]) if result else ""
-        return {"ok": True, "engine": "easyocr", "gpu": getattr(reader, 'gpu', False), "pages": 1, "text": text}
+        devinfo = reader_uses_cuda(reader)
+        tinfo = torch_env_info()
+        return {
+            "ok": True,
+            "engine": "easyocr",
+            "gpu": devinfo["gpu"],
+            "device": devinfo["device"],
+            "torch_cuda": tinfo.get("cuda", False),
+            "pages": 1,
+            "text": text,
+        }
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
     finally:
@@ -273,8 +326,17 @@ async def ocr_pdf_dl(
             result = reader.readtext(np.array(img), detail=1, paragraph=True)
             texts.append("\n".join([r[1] for r in result]) if result else "")
 
-        return {"ok": True, "engine": "easyocr", "gpu": getattr(reader, 'gpu', False),
-                "pages": len(texts), "text": "\n\n".join(texts)}
+        devinfo = reader_uses_cuda(reader)
+        tinfo = torch_env_info()
+        return {
+            "ok": True,
+            "engine": "easyocr",
+            "gpu": devinfo["gpu"],
+            "device": devinfo["device"],
+            "torch_cuda": tinfo.get("cuda", False),
+            "pages": len(texts),
+            "text": "\n\n".join(texts)
+        }
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
     finally:
