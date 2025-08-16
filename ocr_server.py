@@ -19,6 +19,11 @@ from fastapi.responses import JSONResponse
 import tempfile, os, sys, subprocess, base64
 import fitz  # PyMuPDF
 import pytesseract
+
+import os, pytesseract
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+os.environ.setdefault("TESSDATA_PREFIX", r"C:\Program Files\Tesseract-OCR\tessdata")
+
 from PIL import Image
 from typing import Tuple
 
