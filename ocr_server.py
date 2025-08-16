@@ -2,16 +2,12 @@
 # -------------------------------
 # FastAPI local para OCR de imágenes y PDFs
 # - /ocr/image     : Tesseract (CPU) para imágenes
-# - /ocr/pdf       : Extrae texto nativo; si no hay, OCRmyPDF+Tesseract (CPU) y opcionalmente devuelve PDF buscable
+# - /ocr/pdf       : Extrae texto nativo; si no hay, OCRmyPDF+Tesseract (CPU)
 # - /ocr/image_dl  : EasyOCR (GPU si disponible) para imágenes
-# - /ocr/pdf_dl    : Render PDF->imagen (CPU) + EasyOCR (GPU si disponible), devuelve texto
-#
-# Requisitos (Windows):
-#   - Tesseract (con Spanish spa)  -> tesseract --version
-#   - Ghostscript                  -> gswin64c -v
-# Paquetes Python:
-#   fastapi, uvicorn[standard], python-multipart, pytesseract, Pillow, pymupdf, ocrmypdf
-#   (para GPU) torch+CUDA (cu124 recomendado), easyocr, numpy
+# - /ocr/pdf_dl    : Render PDF->imagen (CPU) + EasyOCR (GPU si disponible)
+# Requisitos Windows: Tesseract (spa) y Ghostscript (para /ocr/pdf)
+# Paquetes Python: fastapi, uvicorn[standard], python-multipart, pytesseract,
+#                  Pillow, pymupdf, ocrmypdf, (GPU) torch (CUDA), easyocr, numpy
 # -------------------------------
 
 from fastapi import FastAPI, UploadFile, File, Form
@@ -19,16 +15,15 @@ from fastapi.responses import JSONResponse
 import tempfile, os, sys, subprocess, base64
 import fitz  # PyMuPDF
 import pytesseract
+from PIL import Image
+from typing import Tuple
+import numpy as np
 
-import os, pytesseract
+# --- Fijar Tesseract (evita depender del PATH del proceso) ---
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 os.environ.setdefault("TESSDATA_PREFIX", r"C:\Program Files\Tesseract-OCR\tessdata")
 
-from PIL import Image
-from typing import Tuple
-
 # ---- GPU (DL) imports opcionales ----
-import numpy as np
 try:
     import easyocr
     HAS_EASYOCR = True
@@ -41,10 +36,7 @@ try:
 except Exception:
     HAS_TORCH = False
 
-# (Opcional) fija la ruta a Tesseract si NO está en PATH
-# pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-
-app = FastAPI(title="Local OCR (Tesseract + OCRmyPDF + EasyOCR GPU)", version="1.1")
+app = FastAPI(title="Local OCR (Tesseract + OCRmyPDF + EasyOCR GPU)", version="1.2")
 
 # --------- Utilidades comunes ---------
 def extract_text_native_pdf(pdf_path: str) -> Tuple[str, int]:
@@ -74,7 +66,7 @@ _reader_cache = {}
 def get_easyocr_reader(lang_list, gpu_preference=None):
     """
     Crea o reutiliza un EasyOCR Reader.
-    lang_list: lista de idiomas, ej ['es'] o ['es','en']
+    lang_list: lista de idiomas, ej ['es'] o ['es','en'] (EasyOCR usa 'es'/'en')
     gpu_preference: None => intenta GPU y cae a CPU; True => fuerza GPU; False => CPU
     """
     if not HAS_EASYOCR:
@@ -105,18 +97,36 @@ def list_from_lang_str(lang_str: str):
 @app.get("/health")
 def health():
     """Salud básica: verifica binarios clave y estado de DL."""
-    tesseract_ok = bin_path_exists("tesseract")
-    gs_ok = bin_path_exists("gswin64c") or bin_path_exists("gs")  # Windows/Linux
-    easyocr_ok = HAS_EASYOCR
-    torch_cuda = (HAS_TORCH and torch.cuda.is_available())
-    gpu_name = (torch.cuda.get_device_name(0) if torch_cuda else None)
+    # Tesseract: como fijamos ruta, basta chequear que exista el exe
+    tess_ok = os.path.isfile(pytesseract.pytesseract.tesseract_cmd)
+    # Ghostscript para /ocr/pdf
+    gs_ok = (os.system("where gswin64c >nul 2>&1") == 0) or (os.system("where gs >nul 2>&1") == 0)
+
+    cuda_ok = False
+    gpu_name = None
+    torch_ver = None
+    cuda_ver = None
+    if HAS_TORCH:
+        try:
+            cuda_ok = torch.cuda.is_available()
+            torch_ver = getattr(torch, "__version__", None)
+            cuda_ver = getattr(torch.version, "cuda", None)
+            if cuda_ok:
+                gpu_name = torch.cuda.get_device_name(0)
+        except Exception:
+            pass
+
     return {
         "ok": True,
-        "tesseract": tesseract_ok,
+        "tesseract": tess_ok,
         "ghostscript": gs_ok,
-        "easyocr": easyocr_ok,
-        "cuda": torch_cuda,
-        "gpu": gpu_name
+        "easyocr": HAS_EASYOCR,
+        "cuda": cuda_ok,
+        "gpu": gpu_name,
+        "torch": torch_ver,
+        "torch_cuda": cuda_ver,
+        "python": sys.version.split()[0],
+        "exe": sys.executable,  # útil para confirmar que estás en el venv correcto
     }
 
 # ---------- CPU: Tesseract imagen ----------
@@ -129,8 +139,7 @@ async def ocr_image(
 ):
     """OCR para imágenes con Tesseract (CPU)."""
     tmp = tempfile.NamedTemporaryFile(delete=False)
-    tmp.write(await file.read())
-    tmp.close()
+    tmp.write(await file.read()); tmp.close()
     try:
         img = Image.open(tmp.name).convert("RGB")
         cfg = f"--oem {oem} --psm {psm}"
@@ -148,9 +157,9 @@ async def ocr_pdf(
     file: UploadFile = File(...),
     lang: str = Form("spa"),
     force_ocr: bool = Form(False),           # True => ignora texto nativo
-    jobs: int = Form(1),                     # hilos para ocrmypdf (modo suave)
+    jobs: int = Form(1),                     # hilos para ocrmypdf
     return_searchable_pdf: bool = Form(False),
-    return_pdf_as_base64: bool = Form(False) # si true y return_searchable_pdf, devuelve base64 (ojo tamaño)
+    return_pdf_as_base64: bool = Form(False)
 ):
     """
     OCR para PDFs (CPU):
@@ -158,8 +167,7 @@ async def ocr_pdf(
       2) Si no hay texto: OCRmyPDF (Tesseract + preprocesado) y extraer texto del PDF resultante.
     """
     pdf_in = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    pdf_in.write(await file.read())
-    pdf_in.close()
+    pdf_in.write(await file.read()); pdf_in.close()
 
     out_pdf = None
     try:
@@ -178,8 +186,6 @@ async def ocr_pdf(
             "--optimize", "0",
             pdf_in.name, out_pdf
         ]
-
-        # Limitar hilos internos de Tesseract (OpenMP) para bajar consumo en laptops
         env = os.environ.copy()
         env["OMP_THREAD_LIMIT"] = env.get("OMP_THREAD_LIMIT", "1")
 
@@ -189,13 +195,7 @@ async def ocr_pdf(
             raise RuntimeError(f"OCRmyPDF error: {err}")
 
         text_ocr, pages2 = extract_text_native_pdf(out_pdf)
-
-        resp = {
-            "ok": True,
-            "engine": "tesseract+ocrmypdf",
-            "pages": pages2,
-            "text": text_ocr
-        }
+        resp = {"ok": True, "engine": "tesseract+ocrmypdf", "pages": pages2, "text": text_ocr}
 
         if return_searchable_pdf:
             if return_pdf_as_base64:
@@ -204,8 +204,8 @@ async def ocr_pdf(
                 try: os.remove(out_pdf)
                 except Exception: pass
             else:
-                resp["pdf_path"] = out_pdf  # ruta local temporal (pruebas)
-                out_pdf = None  # conserva archivo
+                resp["pdf_path"] = out_pdf
+                out_pdf = None  # conservar archivo
 
         return resp
 
@@ -222,7 +222,7 @@ async def ocr_pdf(
 @app.post("/ocr/image_dl")
 async def ocr_image_dl(
     file: UploadFile = File(...),
-    lang: str = Form("spa"),            # acepta "spa" o "spa+eng"
+    lang: str = Form("spa"),            # "spa" o "spa+eng"
     use_gpu: bool | None = Form(None)   # True/False/None(auto)
 ):
     """OCR para imágenes con EasyOCR (GPU si disponible). Devuelve texto."""
@@ -246,8 +246,8 @@ async def ocr_pdf_dl(
     file: UploadFile = File(...),
     lang: str = Form("spa"),
     use_gpu: bool | None = Form(None),
-    max_pages: int = Form(0),   # 0 = todas; usa 3 para pruebas
-    dpi: int = Form(300)        # 300 suele ir bien
+    max_pages: int = Form(0),   # 0 = todas
+    dpi: int = Form(300)
 ):
     """
     Convierte PDF a imágenes (CPU) y reconoce con EasyOCR (GPU si disponible). Devuelve texto.
@@ -262,7 +262,6 @@ async def ocr_pdf_dl(
         limit = doc.page_count if max_pages <= 0 else min(max_pages, doc.page_count)
         zoom = dpi / 72.0
         mat = fitz.Matrix(zoom, zoom)
-
         for i in range(limit):
             p = doc.load_page(i)
             pix = p.get_pixmap(matrix=mat, alpha=False)
@@ -278,8 +277,13 @@ async def ocr_pdf_dl(
             result = reader.readtext(np.array(img), detail=1, paragraph=True)
             texts.append("\n".join([r[1] for r in result]) if result else "")
 
-        return {"ok": True, "engine": "easyocr", "gpu": getattr(reader, 'gpu', False),
-                "pages": len(texts), "text": "\n\n".join(texts)}
+        return {
+            "ok": True,
+            "engine": "easyocr",
+            "gpu": getattr(reader, 'gpu', False),
+            "pages": len(texts),
+            "text": "\n\n".join(texts)
+        }
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
     finally:
