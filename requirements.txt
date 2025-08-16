@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pytesseract
+Pillow
+pymupdf
+ocrmypdf
+easyocr       # opcional (si usarás DL)
+numpy         # requerido por easyocr
+torch         # solo si usarás GPU
