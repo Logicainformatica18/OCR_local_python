@@ -1,10 +1,22 @@
+# --- Framework web ---
 fastapi
 uvicorn[standard]
+
+# --- Uploads / multipart ---
 python-multipart
+
+# --- OCR CPU (solo si quieres Tesseract clásico, no usado en este server) ---
 pytesseract
 Pillow
+
+# --- PDFs ---
 pymupdf
-ocrmypdf
-easyocr       # opcional (si usarás DL)
-numpy         # requerido por easyocr
-torch         # solo si usarás GPU
+ocrmypdf    # opcional, si quieres PDFs buscables
+
+# --- OCR GPU (EasyOCR con Torch) ---
+easyocr
+numpy
+
+# --- Torch con CUDA (elige versión correcta según tu GPU) ---
+# Instálalo manualmente según tu entorno:
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
